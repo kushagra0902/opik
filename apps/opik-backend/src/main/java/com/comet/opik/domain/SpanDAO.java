@@ -34,6 +34,8 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.reactivestreams.Publisher;
 import org.stringtemplate.v4.ST;
+import org.stringtemplate.v4.STGroup;
+import org.stringtemplate.v4.STGroupString;
 import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
@@ -71,270 +73,279 @@ import static java.util.function.Predicate.not;
 @Slf4j
 class SpanDAO {
 
-    private static final String BULK_INSERT = """
-            INSERT INTO spans(
-                id,
-                project_id,
-                workspace_id,
-                trace_id,
-                parent_span_id,
-                name,
-                type,
-                start_time,
-                end_time,
-                input,
-                output,
-                metadata,
-                model,
-                provider,
-                total_estimated_cost,
-                total_estimated_cost_version,
-                tags,
-                usage,
-                last_updated_at,
-                error_info,
-                created_by,
-                last_updated_by
-            ) VALUES
-                <items:{item |
-                    (
-                        :id<item.index>,
-                        :project_id<item.index>,
-                        :workspace_id,
-                        :trace_id<item.index>,
-                        :parent_span_id<item.index>,
-                        :name<item.index>,
-                        :type<item.index>,
-                        parseDateTime64BestEffort(:start_time<item.index>, 9),
-                        if(:end_time<item.index> IS NULL, NULL, parseDateTime64BestEffort(:end_time<item.index>, 9)),
-                        :input<item.index>,
-                        :output<item.index>,
-                        :metadata<item.index>,
-                        :model<item.index>,
-                        :provider<item.index>,
-                        toDecimal128(:total_estimated_cost<item.index>, 12),
-                        :total_estimated_cost_version<item.index>,
-                        :tags<item.index>,
-                        mapFromArrays(:usage_keys<item.index>, :usage_values<item.index>),
-                        if(:last_updated_at<item.index> IS NULL, NULL, parseDateTime64BestEffort(:last_updated_at<item.index>, 6)),
-                        :error_info<item.index>,
-                        :created_by<item.index>,
-                        :last_updated_by<item.index>
-                    )
-                    <if(item.hasNext)>,<endif>
-                }>
-            ;
-            """;
+    private static final STGroupString BULK_INSERT_GROUP = new STGroupString(
+            """
+                    main(items) ::= <<
+                    INSERT INTO spans(
+                        id,
+                        project_id,
+                        workspace_id,
+                        trace_id,
+                        parent_span_id,
+                        name,
+                        type,
+                        start_time,
+                        end_time,
+                        input,
+                        output,
+                        metadata,
+                        model,
+                        provider,
+                        total_estimated_cost,
+                        total_estimated_cost_version,
+                        tags,
+                        usage,
+                        last_updated_at,
+                        error_info,
+                        created_by,
+                        last_updated_by
+                    ) VALUES
+                        <items:{item |
+                            (
+                                :id<item.index>,
+                                :project_id<item.index>,
+                                :workspace_id,
+                                :trace_id<item.index>,
+                                :parent_span_id<item.index>,
+                                :name<item.index>,
+                                :type<item.index>,
+                                parseDateTime64BestEffort(:start_time<item.index>, 9),
+                                if(:end_time<item.index> IS NULL, NULL, parseDateTime64BestEffort(:end_time<item.index>, 9)),
+                                :input<item.index>,
+                                :output<item.index>,
+                                :metadata<item.index>,
+                                :model<item.index>,
+                                :provider<item.index>,
+                                toDecimal128(:total_estimated_cost<item.index>, 12),
+                                :total_estimated_cost_version<item.index>,
+                                :tags<item.index>,
+                                mapFromArrays(:usage_keys<item.index>, :usage_values<item.index>),
+                                if(:last_updated_at<item.index> IS NULL, NULL, parseDateTime64BestEffort(:last_updated_at<item.index>, 6)),
+                                :error_info<item.index>,
+                                :created_by<item.index>,
+                                :last_updated_by<item.index>
+                            )
+                            <if(item.hasNext)>,<endif>
+                        }>
+                    ;
+                    >>
+                    """);
 
     /**
      * This query handles the insertion of a new span into the database in two cases:
      * 1. When the span does not exist in the database.
      * 2. When the span exists in the database but the provided span has different values for the fields such as end_time, input, output, metadata and tags.
      **/
-    private static final String INSERT = """
-            INSERT INTO spans(
-                id,
-                project_id,
-                workspace_id,
-                trace_id,
-                parent_span_id,
-                name,
-                type,
-                start_time,
-                end_time,
-                input,
-                output,
-                metadata,
-                model,
-                provider,
-                total_estimated_cost,
-                total_estimated_cost_version,
-                tags,
-                usage,
-                error_info,
-                created_at,
-                created_by,
-                last_updated_by
-            )
-            SELECT
-                new_span.id as id,
-                multiIf(
-                    LENGTH(CAST(old_span.project_id AS Nullable(String))) > 0 AND notEquals(old_span.project_id, new_span.project_id), leftPad('', 40, '*'),
-                    LENGTH(CAST(old_span.project_id AS Nullable(String))) > 0, old_span.project_id,
-                    new_span.project_id
-                ) as project_id,
-                new_span.workspace_id as workspace_id,
-                multiIf(
-                    LENGTH(CAST(old_span.trace_id AS Nullable(String))) > 0 AND notEquals(old_span.trace_id, new_span.trace_id), leftPad('', 40, '*'),
-                    LENGTH(CAST(old_span.trace_id AS Nullable(String))) > 0, old_span.trace_id,
-                    new_span.trace_id
-                ) as trace_id,
-                multiIf(
-                    LENGTH(CAST(old_span.parent_span_id AS Nullable(String))) > 0 AND notEquals(old_span.parent_span_id, new_span.parent_span_id), CAST(leftPad(new_span.parent_span_id, 40, '*') AS FixedString(19)),
-                    LENGTH(CAST(old_span.parent_span_id AS Nullable(String))) > 0, old_span.parent_span_id,
-                    new_span.parent_span_id
-                ) as parent_span_id,
-                multiIf(
-                    LENGTH(old_span.name) > 0, old_span.name,
-                    new_span.name
-                ) as name,
-                multiIf(
-                    notEquals(old_span.type, 'unknown'), old_span.type,
-                    new_span.type
-                ) as type,
-                multiIf(
-                    notEquals(old_span.start_time, toDateTime64('1970-01-01 00:00:00.000', 9)) AND old_span.start_time >= toDateTime64('1970-01-01 00:00:00.000', 9), old_span.start_time,
-                    new_span.start_time
-                ) as start_time,
-                multiIf(
-                    isNotNull(old_span.end_time), old_span.end_time,
-                    new_span.end_time
-                ) as end_time,
-                multiIf(
-                    LENGTH(old_span.input) > 0, old_span.input,
-                    new_span.input
-                ) as input,
-                multiIf(
-                    LENGTH(old_span.output) > 0, old_span.output,
-                    new_span.output
-                ) as output,
-                multiIf(
-                    LENGTH(old_span.metadata) > 0, old_span.metadata,
-                    new_span.metadata
-                ) as metadata,
-                multiIf(
-                    LENGTH(old_span.model) > 0, old_span.model,
-                    new_span.model
-                ) as model,
-                multiIf(
-                    LENGTH(old_span.provider) > 0, old_span.provider,
-                    new_span.provider
-                ) as provider,
-                multiIf(
-                    old_span.total_estimated_cost > 0, old_span.total_estimated_cost,
-                    new_span.total_estimated_cost
-                ) as total_estimated_cost,
-                multiIf(
-                    LENGTH(old_span.total_estimated_cost_version) > 0, old_span.total_estimated_cost_version,
-                    new_span.total_estimated_cost_version
-                ) as total_estimated_cost_version,
-                multiIf(
-                    notEmpty(old_span.tags), old_span.tags,
-                    new_span.tags
-                ) as tags,
-                multiIf(
-                    notEmpty(mapKeys(old_span.usage)), old_span.usage,
-                    new_span.usage
-                ) as usage,
-                multiIf(
-                    LENGTH(old_span.error_info) > 0, old_span.error_info,
-                    new_span.error_info
-                ) as error_info,
-                multiIf(
-                    notEquals(old_span.created_at, toDateTime64('1970-01-01 00:00:00.000', 9)) AND old_span.created_at >= toDateTime64('1970-01-01 00:00:00.000', 9), old_span.created_at,
-                    new_span.created_at
-                ) as created_at,
-                multiIf(
-                    LENGTH(old_span.created_by) > 0, old_span.created_by,
-                    new_span.created_by
-                ) as created_by,
-                new_span.last_updated_by as last_updated_by
-            FROM (
-                SELECT
-                    :id as id,
-                    :project_id as project_id,
-                    :workspace_id as workspace_id,
-                    :trace_id as trace_id,
-                    :parent_span_id as parent_span_id,
-                    :name as name,
-                    :type as type,
-                    parseDateTime64BestEffort(:start_time, 9) as start_time,
-                    <if(end_time)> parseDateTime64BestEffort(:end_time, 9) as end_time, <else> null as end_time, <endif>
-                    :input as input,
-                    :output as output,
-                    :metadata as metadata,
-                    :model as model,
-                    :provider as provider,
-                    toDecimal128(:total_estimated_cost, 12) as total_estimated_cost,
-                    :total_estimated_cost_version as total_estimated_cost_version,
-                    :tags as tags,
-                    mapFromArrays(:usage_keys, :usage_values) as usage,
-                    :error_info as error_info,
-                    now64(9) as created_at,
-                    :user_name as created_by,
-                    :user_name as last_updated_by
-            ) as new_span
-            LEFT JOIN (
-                SELECT
-                    *
-                FROM spans
-                WHERE workspace_id = :workspace_id
-                AND id = :id
-                ORDER BY (workspace_id, project_id, trace_id, parent_span_id, id) DESC, last_updated_at DESC
-                LIMIT 1
-            ) as old_span
-            ON new_span.id = old_span.id
-            ;
-            """;
+    private static final STGroupString INSERT_GROUP = new STGroupString(
+            """
+                    main(end_time) ::= <<
+                    INSERT INTO spans(
+                        id,
+                        project_id,
+                        workspace_id,
+                        trace_id,
+                        parent_span_id,
+                        name,
+                        type,
+                        start_time,
+                        end_time,
+                        input,
+                        output,
+                        metadata,
+                        model,
+                        provider,
+                        total_estimated_cost,
+                        total_estimated_cost_version,
+                        tags,
+                        usage,
+                        error_info,
+                        created_at,
+                        created_by,
+                        last_updated_by
+                    )
+                    SELECT
+                        new_span.id as id,
+                        multiIf(
+                            LENGTH(CAST(old_span.project_id AS Nullable(String))) > 0 AND notEquals(old_span.project_id, new_span.project_id), leftPad('', 40, '*'),
+                            LENGTH(CAST(old_span.project_id AS Nullable(String))) > 0, old_span.project_id,
+                            new_span.project_id
+                        ) as project_id,
+                        new_span.workspace_id as workspace_id,
+                        multiIf(
+                            LENGTH(CAST(old_span.trace_id AS Nullable(String))) > 0 AND notEquals(old_span.trace_id, new_span.trace_id), leftPad('', 40, '*'),
+                            LENGTH(CAST(old_span.trace_id AS Nullable(String))) > 0, old_span.trace_id,
+                            new_span.trace_id
+                        ) as trace_id,
+                        multiIf(
+                            LENGTH(CAST(old_span.parent_span_id AS Nullable(String))) > 0 AND notEquals(old_span.parent_span_id, new_span.parent_span_id), CAST(leftPad(new_span.parent_span_id, 40, '*') AS FixedString(19)),
+                            LENGTH(CAST(old_span.parent_span_id AS Nullable(String))) > 0, old_span.parent_span_id,
+                            new_span.parent_span_id
+                        ) as parent_span_id,
+                        multiIf(
+                            LENGTH(old_span.name) > 0, old_span.name,
+                            new_span.name
+                        ) as name,
+                        multiIf(
+                            notEquals(old_span.type, 'unknown'), old_span.type,
+                            new_span.type
+                        ) as type,
+                        multiIf(
+                            notEquals(old_span.start_time, toDateTime64('1970-01-01 00:00:00.000', 9)) AND old_span.start_time >= toDateTime64('1970-01-01 00:00:00.000', 9), old_span.start_time,
+                            new_span.start_time
+                        ) as start_time,
+                        multiIf(
+                            isNotNull(old_span.end_time), old_span.end_time,
+                            new_span.end_time
+                        ) as end_time,
+                        multiIf(
+                            LENGTH(old_span.input) > 0, old_span.input,
+                            new_span.input
+                        ) as input,
+                        multiIf(
+                            LENGTH(old_span.output) > 0, old_span.output,
+                            new_span.output
+                        ) as output,
+                        multiIf(
+                            LENGTH(old_span.metadata) > 0, old_span.metadata,
+                            new_span.metadata
+                        ) as metadata,
+                        multiIf(
+                            LENGTH(old_span.model) > 0, old_span.model,
+                            new_span.model
+                        ) as model,
+                        multiIf(
+                            LENGTH(old_span.provider) > 0, old_span.provider,
+                            new_span.provider
+                        ) as provider,
+                        multiIf(
+                            old_span.total_estimated_cost > 0, old_span.total_estimated_cost,
+                            new_span.total_estimated_cost
+                        ) as total_estimated_cost,
+                        multiIf(
+                            LENGTH(old_span.total_estimated_cost_version) > 0, old_span.total_estimated_cost_version,
+                            new_span.total_estimated_cost_version
+                        ) as total_estimated_cost_version,
+                        multiIf(
+                            notEmpty(old_span.tags), old_span.tags,
+                            new_span.tags
+                        ) as tags,
+                        multiIf(
+                            notEmpty(mapKeys(old_span.usage)), old_span.usage,
+                            new_span.usage
+                        ) as usage,
+                        multiIf(
+                            LENGTH(old_span.error_info) > 0, old_span.error_info,
+                            new_span.error_info
+                        ) as error_info,
+                        multiIf(
+                            notEquals(old_span.created_at, toDateTime64('1970-01-01 00:00:00.000', 9)) AND old_span.created_at >= toDateTime64('1970-01-01 00:00:00.000', 9), old_span.created_at,
+                            new_span.created_at
+                        ) as created_at,
+                        multiIf(
+                            LENGTH(old_span.created_by) > 0, old_span.created_by,
+                            new_span.created_by
+                        ) as created_by,
+                        new_span.last_updated_by as last_updated_by
+                    FROM (
+                        SELECT
+                            :id as id,
+                            :project_id as project_id,
+                            :workspace_id as workspace_id,
+                            :trace_id as trace_id,
+                            :parent_span_id as parent_span_id,
+                            :name as name,
+                            :type as type,
+                            parseDateTime64BestEffort(:start_time, 9) as start_time,
+                            <if(end_time)> parseDateTime64BestEffort(:end_time, 9) as end_time, <else> null as end_time, <endif>
+                            :input as input,
+                            :output as output,
+                            :metadata as metadata,
+                            :model as model,
+                            :provider as provider,
+                            toDecimal128(:total_estimated_cost, 12) as total_estimated_cost,
+                            :total_estimated_cost_version as total_estimated_cost_version,
+                            :tags as tags,
+                            mapFromArrays(:usage_keys, :usage_values) as usage,
+                            :error_info as error_info,
+                            now64(9) as created_at,
+                            :user_name as created_by,
+                            :user_name as last_updated_by
+                    ) as new_span
+                    LEFT JOIN (
+                        SELECT
+                            *
+                        FROM spans
+                        WHERE workspace_id = :workspace_id
+                        AND id = :id
+                        ORDER BY (workspace_id, project_id, trace_id, parent_span_id, id) DESC, last_updated_at DESC
+                        LIMIT 1
+                    ) as old_span
+                    ON new_span.id = old_span.id
+                    ;
+                    >>
+                    """);
 
     /***
      * Handles the update of a span when the span already exists in the database.
      ***/
     //TODO: refactor to implement proper conflict resolution
-    private static final String UPDATE = """
-            INSERT INTO spans (
-            	id,
-            	project_id,
-            	workspace_id,
-            	trace_id,
-            	parent_span_id,
-            	name,
-            	type,
-            	start_time,
-            	end_time,
-            	input,
-            	output,
-            	metadata,
-            	model,
-            	provider,
-            	total_estimated_cost,
-                total_estimated_cost_version,
-            	tags,
-            	usage,
-            	error_info,
-            	created_at,
-            	created_by,
-            	last_updated_by
-            ) SELECT
-            	id,
-            	project_id,
-            	workspace_id,
-            	trace_id,
-            	parent_span_id,
-                <if(name)> :name <else> name <endif> as name,
-            	<if(type)> :type <else> type <endif> as type,
-            	start_time,
-            	<if(end_time)> parseDateTime64BestEffort(:end_time, 9) <else> end_time <endif> as end_time,
-            	<if(input)> :input <else> input <endif> as input,
-            	<if(output)> :output <else> output <endif> as output,
-            	<if(metadata)> :metadata <else> metadata <endif> as metadata,
-            	<if(model)> :model <else> model <endif> as model,
-            	<if(provider)> :provider <else> provider <endif> as provider,
-            	<if(total_estimated_cost)> toDecimal128(:total_estimated_cost, 12) <else> total_estimated_cost <endif> as total_estimated_cost,
-            	<if(total_estimated_cost_version)> :total_estimated_cost_version <else> total_estimated_cost_version <endif> as total_estimated_cost_version,
-            	<if(tags)> :tags <else> tags <endif> as tags,
-            	<if(usage)> CAST((:usageKeys, :usageValues), 'Map(String, Int64)') <else> usage <endif> as usage,
-            	<if(error_info)> :error_info <else> error_info <endif> as error_info,
-            	created_at,
-            	created_by,
-                :user_name as last_updated_by
-            FROM spans
-            WHERE id = :id
-            AND workspace_id = :workspace_id
-            ORDER BY (workspace_id, project_id, trace_id, parent_span_id, id) DESC, last_updated_at DESC
-            LIMIT 1
-            ;
-            """;
+    private static final STGroupString UPDATE_GROUP = new STGroupString(
+            """
+                    main(name, type, input, output, tags, metadata, model, provider, end_time, usage, error_info, total_estimated_cost, total_estimated_cost_version) ::= <<
+                    INSERT INTO spans (
+                        id,
+                        project_id,
+                        workspace_id,
+                        trace_id,
+                        parent_span_id,
+                        name,
+                        type,
+                        start_time,
+                        end_time,
+                        input,
+                        output,
+                        metadata,
+                        model,
+                        provider,
+                        total_estimated_cost,
+                        total_estimated_cost_version,
+                        tags,
+                        usage,
+                        error_info,
+                        created_at,
+                        created_by,
+                        last_updated_by
+                    ) SELECT
+                        id,
+                        project_id,
+                        workspace_id,
+                        trace_id,
+                        parent_span_id,
+                        <if(name)> :name <else> name <endif> as name,
+                        <if(type)> :type <else> type <endif> as type,
+                        start_time,
+                        <if(end_time)> parseDateTime64BestEffort(:end_time, 9) <else> end_time <endif> as end_time,
+                        <if(input)> :input <else> input <endif> as input,
+                        <if(output)> :output <else> output <endif> as output,
+                        <if(metadata)> :metadata <else> metadata <endif> as metadata,
+                        <if(model)> :model <else> model <endif> as model,
+                        <if(provider)> :provider <else> provider <endif> as provider,
+                        <if(total_estimated_cost)> toDecimal128(:total_estimated_cost, 12) <else> total_estimated_cost <endif> as total_estimated_cost,
+                        <if(total_estimated_cost_version)> :total_estimated_cost_version <else> total_estimated_cost_version <endif> as total_estimated_cost_version,
+                        <if(tags)> :tags <else> tags <endif> as tags,
+                        <if(usage)> CAST((:usageKeys, :usageValues), 'Map(String, Int64)') <else> usage <endif> as usage,
+                        <if(error_info)> :error_info <else> error_info <endif> as error_info,
+                        created_at,
+                        created_by,
+                        :user_name as last_updated_by
+                    FROM spans
+                    WHERE id = :id
+                    AND workspace_id = :workspace_id
+                    ORDER BY (workspace_id, project_id, trace_id, parent_span_id, id) DESC, last_updated_at DESC
+                    LIMIT 1
+                    ;
+                    >>
+                    """);
 
     /**
      * This query is used when updates are processed before inserts, and the span does not exist in the database.
@@ -345,146 +356,148 @@ class SpanDAO {
      * This happens because the query is used in a patch endpoint which allows partial updates, so the query will update only the provided fields.
      * The remaining fields will be updated/inserted once the POST arrives with the all mandatory fields to create the trace.
      */
-    //TODO: refactor to implement proper conflict resolution
-    private static final String PARTIAL_INSERT = """
-            INSERT INTO spans(
-                id, project_id, workspace_id, trace_id, parent_span_id, name, type,
-                start_time, end_time, input, output, metadata, model, provider, total_estimated_cost, total_estimated_cost_version, tags, usage, error_info, created_at,
-                created_by, last_updated_by
-            )
-            SELECT
-                new_span.id as id,
-                multiIf(
-                    LENGTH(CAST(old_span.project_id AS Nullable(String))) > 0 AND notEquals(old_span.project_id, new_span.project_id), leftPad('', 40, '*'),
-                    LENGTH(CAST(old_span.project_id AS Nullable(String))) > 0, old_span.project_id,
-                    new_span.project_id
-                ) as project_id,
-                new_span.workspace_id as workspace_id,
-                multiIf(
-                    LENGTH(CAST(old_span.trace_id AS Nullable(String))) > 0 AND notEquals(old_span.trace_id, new_span.trace_id), leftPad('', 40, '*'),
-                    LENGTH(CAST(old_span.trace_id AS Nullable(String))) > 0, old_span.trace_id,
-                    new_span.trace_id
-                ) as trace_id,
-                multiIf(
-                    LENGTH(CAST(old_span.parent_span_id AS Nullable(String))) > 0 AND notEquals(old_span.parent_span_id, new_span.parent_span_id), leftPad('', 40, '*'),
-                    LENGTH(CAST(old_span.parent_span_id AS Nullable(String))) > 0, old_span.parent_span_id,
-                    new_span.parent_span_id
-                ) as parent_span_id,
-                multiIf(
-                    LENGTH(new_span.name) > 0, new_span.name,
-                    LENGTH(old_span.name) > 0, old_span.name,
-                    new_span.name
-                ) as name,
-                multiIf(
-                    notEquals(new_span.type, 'unknown'), new_span.type,
-                    notEquals(old_span.type, 'unknown'), old_span.type,
-                    new_span.type
-                ) as type,
-                multiIf(
-                    notEquals(old_span.start_time, toDateTime64('1970-01-01 00:00:00.000', 9)) AND old_span.start_time >= toDateTime64('1970-01-01 00:00:00.000', 9), old_span.start_time,
-                    new_span.start_time
-                ) as start_time,
-                multiIf(
-                    notEquals(new_span.end_time, toDateTime64('1970-01-01 00:00:00.000', 9)) AND new_span.end_time >= toDateTime64('1970-01-01 00:00:00.000', 9), new_span.end_time,
-                    notEquals(old_span.end_time, toDateTime64('1970-01-01 00:00:00.000', 9)) AND old_span.end_time >= toDateTime64('1970-01-01 00:00:00.000', 9), old_span.end_time,
-                    new_span.end_time
-                ) as end_time,
-                multiIf(
-                    LENGTH(new_span.input) > 0, new_span.input,
-                    LENGTH(old_span.input) > 0, old_span.input,
-                    new_span.input
-                ) as input,
-                multiIf(
-                    LENGTH(new_span.output) > 0, new_span.output,
-                    LENGTH(old_span.output) > 0, old_span.output,
-                    new_span.output
-                ) as output,
-                multiIf(
-                    LENGTH(new_span.metadata) > 0, new_span.metadata,
-                    LENGTH(old_span.metadata) > 0, old_span.metadata,
-                    new_span.metadata
-                ) as metadata,
-                multiIf(
-                    LENGTH(new_span.model) > 0, new_span.model,
-                    LENGTH(old_span.model) > 0, old_span.model,
-                    new_span.model
-                ) as model,
-                multiIf(
-                    LENGTH(new_span.provider) > 0, new_span.provider,
-                    LENGTH(old_span.provider) > 0, old_span.provider,
-                    new_span.provider
-                ) as provider,
-                multiIf(
-                    new_span.total_estimated_cost > 0, new_span.total_estimated_cost,
-                    old_span.total_estimated_cost > 0, old_span.total_estimated_cost,
-                    new_span.total_estimated_cost
-                ) as total_estimated_cost,
-                multiIf(
-                    LENGTH(new_span.total_estimated_cost_version) > 0, new_span.total_estimated_cost_version,
-                    LENGTH(old_span.total_estimated_cost_version) > 0, old_span.total_estimated_cost_version,
-                    new_span.total_estimated_cost_version
-                ) as total_estimated_cost_version,
-                multiIf(
-                    notEmpty(new_span.tags), new_span.tags,
-                    notEmpty(old_span.tags), old_span.tags,
-                    new_span.tags
-                ) as tags,
-                multiIf(
-                    notEmpty(mapKeys(new_span.usage)), new_span.usage,
-                    notEmpty(mapKeys(old_span.usage)), old_span.usage,
-                    new_span.usage
-                ) as usage,
-                multiIf(
-                    LENGTH(new_span.error_info) > 0, new_span.error_info,
-                    LENGTH(old_span.error_info) > 0, old_span.error_info,
-                    new_span.error_info
-                ) as error_info,
-                multiIf(
-                    notEquals(old_span.created_at, toDateTime64('1970-01-01 00:00:00.000', 9)) AND old_span.created_at >= toDateTime64('1970-01-01 00:00:00.000', 9), old_span.created_at,
-                    new_span.created_at
-                ) as created_at,
-                multiIf(
-                    LENGTH(old_span.created_by) > 0, old_span.created_by,
-                    new_span.created_by
-                ) as created_by,
-                new_span.last_updated_by as last_updated_by
-            FROM (
-                SELECT
-                    :id as id,
-                    :project_id as project_id,
-                    :workspace_id as workspace_id,
-                    :trace_id as trace_id,
-                    :parent_span_id as parent_span_id,
-                    <if(name)> :name <else> '' <endif> as name,
-                    <if(type)> :type <else> 'unknown' <endif> as type,
-                    toDateTime64('1970-01-01 00:00:00.000', 9) as start_time,
-                    <if(end_time)> parseDateTime64BestEffort(:end_time, 9) <else> null <endif> as end_time,
-                    <if(input)> :input <else> '' <endif> as input,
-                    <if(output)> :output <else> '' <endif> as output,
-                    <if(metadata)> :metadata <else> '' <endif> as metadata,
-                    <if(model)> :model <else> '' <endif> as model,
-                    <if(provider)> :provider <else> '' <endif> as provider,
-                    <if(total_estimated_cost)> toDecimal128(:total_estimated_cost, 12) <else> toDecimal128(0, 12) <endif> as total_estimated_cost,
-                    <if(total_estimated_cost_version)> :total_estimated_cost_version <else> '' <endif> as total_estimated_cost_version,
-                    <if(tags)> :tags <else> [] <endif> as tags,
-                    <if(usage)> CAST((:usageKeys, :usageValues), 'Map(String, Int64)') <else>  mapFromArrays([], []) <endif> as usage,
-                    <if(error_info)> :error_info <else> '' <endif> as error_info,
-                    now64(9) as created_at,
-                    :user_name as created_by,
-                    :user_name as last_updated_by
-            ) as new_span
-            LEFT JOIN (
-                SELECT
-                    *
-                FROM spans
-                WHERE id = :id
-                AND workspace_id = :workspace_id
-                ORDER BY (workspace_id, project_id, trace_id, parent_span_id, id) DESC, last_updated_at DESC
-                LIMIT 1
-            ) as old_span
-            ON new_span.id = old_span.id
-            ;
-            """;
+    private static final STGroupString PARTIAL_INSERT_GROUP = new STGroupString(
+            """
+                    main(name, type, input, output, tags, metadata, model, provider, end_time, usage, error_info, total_estimated_cost, total_estimated_cost_version) ::= <<
+                    INSERT INTO spans(
+                        id, project_id, workspace_id, trace_id, parent_span_id, name, type,
+                        start_time, end_time, input, output, metadata, model, provider, total_estimated_cost, total_estimated_cost_version, tags, usage, error_info, created_at,
+                        created_by, last_updated_by
+                    )
+                    SELECT
+                        new_span.id as id,
+                        multiIf(
+                            LENGTH(CAST(old_span.project_id AS Nullable(String))) > 0 AND notEquals(old_span.project_id, new_span.project_id), leftPad('', 40, '*'),
+                            LENGTH(CAST(old_span.project_id AS Nullable(String))) > 0, old_span.project_id,
+                            new_span.project_id
+                        ) as project_id,
+                        new_span.workspace_id as workspace_id,
+                        multiIf(
+                            LENGTH(CAST(old_span.trace_id AS Nullable(String))) > 0 AND notEquals(old_span.trace_id, new_span.trace_id), leftPad('', 40, '*'),
+                            LENGTH(CAST(old_span.trace_id AS Nullable(String))) > 0, old_span.trace_id,
+                            new_span.trace_id
+                        ) as trace_id,
+                        multiIf(
+                            LENGTH(CAST(old_span.parent_span_id AS Nullable(String))) > 0 AND notEquals(old_span.parent_span_id, new_span.parent_span_id), leftPad('', 40, '*'),
+                            LENGTH(CAST(old_span.parent_span_id AS Nullable(String))) > 0, old_span.parent_span_id,
+                            new_span.parent_span_id
+                        ) as parent_span_id,
+                        multiIf(
+                            LENGTH(new_span.name) > 0, new_span.name,
+                            LENGTH(old_span.name) > 0, old_span.name,
+                            new_span.name
+                        ) as name,
+                        multiIf(
+                            notEquals(new_span.type, 'unknown'), new_span.type,
+                            notEquals(old_span.type, 'unknown'), old_span.type,
+                            new_span.type
+                        ) as type,
+                        multiIf(
+                            notEquals(old_span.start_time, toDateTime64('1970-01-01 00:00:00.000', 9)) AND old_span.start_time >= toDateTime64('1970-01-01 00:00:00.000', 9), old_span.start_time,
+                            new_span.start_time
+                        ) as start_time,
+                        multiIf(
+                            notEquals(new_span.end_time, toDateTime64('1970-01-01 00:00:00.000', 9)) AND new_span.end_time >= toDateTime64('1970-01-01 00:00:00.000', 9), new_span.end_time,
+                            notEquals(old_span.end_time, toDateTime64('1970-01-01 00:00:00.000', 9)) AND old_span.end_time >= toDateTime64('1970-01-01 00:00:00.000', 9), old_span.end_time,
+                            new_span.end_time
+                        ) as end_time,
+                        multiIf(
+                            LENGTH(new_span.input) > 0, new_span.input,
+                            LENGTH(old_span.input) > 0, old_span.input,
+                            new_span.input
+                        ) as input,
+                        multiIf(
+                            LENGTH(new_span.output) > 0, new_span.output,
+                            LENGTH(old_span.output) > 0, old_span.output,
+                            new_span.output
+                        ) as output,
+                        multiIf(
+                            LENGTH(new_span.metadata) > 0, new_span.metadata,
+                            LENGTH(old_span.metadata) > 0, old_span.metadata,
+                            new_span.metadata
+                        ) as metadata,
+                        multiIf(
+                            LENGTH(new_span.model) > 0, new_span.model,
+                            LENGTH(old_span.model) > 0, old_span.model,
+                            new_span.model
+                        ) as model,
+                        multiIf(
+                            LENGTH(new_span.provider) > 0, new_span.provider,
+                            LENGTH(old_span.provider) > 0, old_span.provider,
+                            new_span.provider
+                        ) as provider,
+                        multiIf(
+                            new_span.total_estimated_cost > 0, new_span.total_estimated_cost,
+                            old_span.total_estimated_cost > 0, old_span.total_estimated_cost,
+                            new_span.total_estimated_cost
+                        ) as total_estimated_cost,
+                        multiIf(
+                            LENGTH(new_span.total_estimated_cost_version) > 0, new_span.total_estimated_cost_version,
+                            LENGTH(old_span.total_estimated_cost_version) > 0, old_span.total_estimated_cost_version,
+                            new_span.total_estimated_cost_version
+                        ) as total_estimated_cost_version,
+                        multiIf(
+                            notEmpty(new_span.tags), new_span.tags,
+                            notEmpty(old_span.tags), old_span.tags,
+                            new_span.tags
+                        ) as tags,
+                        multiIf(
+                            notEmpty(mapKeys(new_span.usage)), new_span.usage,
+                            notEmpty(mapKeys(old_span.usage)), old_span.usage,
+                            new_span.usage
+                        ) as usage,
+                        multiIf(
+                            LENGTH(new_span.error_info) > 0, new_span.error_info,
+                            LENGTH(old_span.error_info) > 0, old_span.error_info,
+                            new_span.error_info
+                        ) as error_info,
+                        multiIf(
+                            notEquals(old_span.created_at, toDateTime64('1970-01-01 00:00:00.000', 9)) AND old_span.created_at >= toDateTime64('1970-01-01 00:00:00.000', 9), old_span.created_at,
+                            new_span.created_at
+                        ) as created_at,
+                        multiIf(
+                            LENGTH(old_span.created_by) > 0, old_span.created_by,
+                            new_span.created_by
+                        ) as created_by,
+                        new_span.last_updated_by as last_updated_by
+                    FROM (
+                        SELECT
+                            :id as id,
+                            :project_id as project_id,
+                            :workspace_id as workspace_id,
+                            :trace_id as trace_id,
+                            :parent_span_id as parent_span_id,
+                            <if(name)> :name <else> '' <endif> as name,
+                            <if(type)> :type <else> 'unknown' <endif> as type,
+                            toDateTime64('1970-01-01 00:00:00.000', 9) as start_time,
+                            <if(end_time)> parseDateTime64BestEffort(:end_time, 9) <else> null <endif> as end_time,
+                            <if(input)> :input <else> '' <endif> as input,
+                            <if(output)> :output <else> '' <endif> as output,
+                            <if(metadata)> :metadata <else> '' <endif> as metadata,
+                            <if(model)> :model <else> '' <endif> as model,
+                            <if(provider)> :provider <else> '' <endif> as provider,
+                            <if(total_estimated_cost)> toDecimal128(:total_estimated_cost, 12) <else> toDecimal128(0, 12) <endif> as total_estimated_cost,
+                            <if(total_estimated_cost_version)> :total_estimated_cost_version <else> '' <endif> as total_estimated_cost_version,
+                            <if(tags)> :tags <else> [] <endif> as tags,
+                            <if(usage)> CAST((:usageKeys, :usageValues), 'Map(String, Int64)') <else>  mapFromArrays([], []) <endif> as usage,
+                            <if(error_info)> :error_info <else> '' <endif> as error_info,
+                            now64(9) as created_at,
+                            :user_name as created_by,
+                            :user_name as last_updated_by
+                    ) as new_span
+                    LEFT JOIN (
+                        SELECT
+                            *
+                        FROM spans
+                        WHERE id = :id
+                        AND workspace_id = :workspace_id
+                        ORDER BY (workspace_id, project_id, trace_id, parent_span_id, id) DESC, last_updated_at DESC
+                        LIMIT 1
+                    ) as old_span
+                    ON new_span.id = old_span.id
+                    ;
+                    >>
+                    """);
 
     private static final String SELECT_BY_ID = """
             SELECT
@@ -564,145 +577,149 @@ class SpanDAO {
             ;
             """;
 
-    private static final String SELECT_BY_PROJECT_ID = """
-            WITH comments_final AS (
-              SELECT
-                   entity_id,
-                   groupArray(tuple(
-                       id AS comment_id,
-                       text,
-                       created_at AS comment_created_at,
-                       last_updated_at AS comment_last_updated_at,
-                       created_by AS comment_created_by,
-                       last_updated_by AS comment_last_updated_by
-                   )) as comments
-              FROM (
-                SELECT
-                    id,
-                    text,
-                    created_at,
-                    last_updated_at,
-                    created_by,
-                    last_updated_by,
-                    entity_id,
-                    workspace_id,
-                    project_id
-                FROM comments
-                WHERE workspace_id = :workspace_id
-                AND project_id = :project_id
-                ORDER BY (workspace_id, project_id, entity_id, id) DESC, last_updated_at DESC
-                LIMIT 1 BY id
-              )
-              GROUP BY workspace_id, project_id, entity_id
-            ), feedback_scores_agg AS (
-                SELECT
-                    entity_id,
-                    mapFromArrays(
-                        groupArray(name),
-                        groupArray(value)
-                    ) as feedback_scores,
-                    groupArray(tuple(
-                         name,
-                         category_name,
-                         value,
-                         reason,
-                         source,
-                         created_at,
-                         last_updated_at,
-                         created_by,
-                         last_updated_by
-                    )) as feedback_scores_list
-                FROM feedback_scores final
-                WHERE entity_type = 'span'
-                AND workspace_id = :workspace_id
-                AND project_id = :project_id
-                GROUP BY workspace_id, project_id, entity_id
-            )
-            <if(feedback_scores_empty_filters)>
-             , fsc AS (SELECT entity_id, COUNT(entity_id) AS feedback_scores_count
-                 FROM (
-                    SELECT *
-                    FROM feedback_scores
-                    WHERE entity_type = 'span'
-                    AND workspace_id = :workspace_id
-                    AND project_id = :project_id
-                    ORDER BY (workspace_id, project_id, entity_type, entity_id, name) DESC, last_updated_at DESC
-                    LIMIT 1 BY entity_id, name
-                 )
-                 GROUP BY entity_id
-                 HAVING <feedback_scores_empty_filters>
-            )
-            <endif>
-            , spans_final AS (
-                SELECT
-                      s.* <if(exclude_fields)>EXCEPT (<exclude_fields>) <endif>,
-                      if(end_time IS NOT NULL AND start_time IS NOT NULL
-                               AND notEquals(start_time, toDateTime64('1970-01-01 00:00:00.000', 9)),
-                           (dateDiff('microsecond', start_time, end_time) / 1000.0),
-                           NULL) AS duration
-                FROM spans s
-                <if(sort_has_feedback_scores)>
-                LEFT JOIN feedback_scores_agg fsagg ON fsagg.entity_id = s.id
-                <endif>
-                WHERE project_id = :project_id
-                AND workspace_id = :workspace_id
-                <if(last_received_span_id)> AND id \\< :last_received_span_id <endif>
-                <if(trace_id)> AND trace_id = :trace_id <endif>
-                <if(type)> AND type = :type <endif>
-                <if(filters)> AND <filters> <endif>
-                <if(feedback_scores_filters)>
-                AND id in (
-                  SELECT
-                      entity_id
-                  FROM (
-                      SELECT *
-                      FROM feedback_scores
-                      WHERE entity_type = 'span'
-                      AND project_id = :project_id
-                      ORDER BY (workspace_id, project_id, entity_type, entity_id, name) DESC, last_updated_at DESC
-                      LIMIT 1 BY entity_id, name
-                  )
-                  GROUP BY entity_id
-                  HAVING <feedback_scores_filters>
-                )
-                <endif>
-                <if(feedback_scores_empty_filters)>
-                 AND (
-                    id IN (SELECT entity_id FROM fsc WHERE fsc.feedback_scores_count = 0)
-                        OR
-                    id NOT IN (SELECT entity_id FROM fsc)
-                 )
-                <endif>
-                <if(stream)>
-                ORDER BY (workspace_id, project_id, id) DESC, last_updated_at DESC
-                <else>
-                ORDER BY <if(sort_fields)> <sort_fields>, id DESC <else>(workspace_id, project_id, trace_id, parent_span_id, id) DESC, last_updated_at DESC <endif>
-                <endif>
-                LIMIT 1 BY id
-                LIMIT :limit <if(offset)>OFFSET :offset <endif>
-            )
-            SELECT
-                s.* <if(exclude_fields)>EXCEPT (<exclude_fields>, input, output, metadata) <else> EXCEPT (input, output, metadata)<endif>
-                <if(!exclude_input)>, <if(truncate)> replaceRegexpAll(s.input, '<truncate>', '"[image]"') as input <else> s.input as input<endif> <endif>
-                <if(!exclude_output)>, <if(truncate)> replaceRegexpAll(s.output, '<truncate>', '"[image]"') as output <else> s.output as output<endif> <endif>
-                <if(!exclude_metadata)>, <if(truncate)> replaceRegexpAll(s.metadata, '<truncate>', '"[image]"') as metadata <else> s.metadata as metadata<endif> <endif>
-                <if(!exclude_feedback_scores)>
-                , fsa.feedback_scores_list as feedback_scores_list
-                , fsa.feedback_scores as feedback_scores
-                <endif>
-                <if(!exclude_comments)>, c.comments AS comments <endif>
-            FROM spans_final s
-            LEFT JOIN comments_final c ON s.id = c.entity_id
-            LEFT JOIN feedback_scores_agg fsa ON fsa.entity_id = s.id
-            <if(stream)>
-            ORDER BY (workspace_id, project_id, id) DESC, last_updated_at DESC
-            <else>
-            ORDER BY <if(sort_fields)> <sort_fields>, id DESC <else>(workspace_id, project_id, trace_id, parent_span_id, id) DESC, last_updated_at DESC <endif>
-            <endif>
-            ;
-            """;
+    private static final STGroupString SELECT_BY_PROJECT_ID_GROUP = new STGroupString(
+            """
+                    main(trace_id, type, filters, feedback_scores_filters, feedback_scores_empty_filters, last_received_span_id, exclude_fields, exclude_input, exclude_output, exclude_metadata, exclude_feedback_scores, exclude_comments, sort_has_feedback_scores, stream, sort_fields, limit, offset, truncate) ::= <<
+                    WITH comments_final AS (
+                      SELECT
+                           entity_id,
+                           groupArray(tuple(
+                               id AS comment_id,
+                               text,
+                               created_at AS comment_created_at,
+                               last_updated_at AS comment_last_updated_at,
+                               created_by AS comment_created_by,
+                               last_updated_by AS comment_last_updated_by
+                           )) as comments
+                      FROM (
+                        SELECT
+                            id,
+                            text,
+                            created_at,
+                            last_updated_at,
+                            created_by,
+                            last_updated_by,
+                            entity_id,
+                            workspace_id,
+                            project_id
+                        FROM comments
+                        WHERE workspace_id = :workspace_id
+                        AND project_id = :project_id
+                        ORDER BY (workspace_id, project_id, entity_id, id) DESC, last_updated_at DESC
+                        LIMIT 1 BY id
+                      )
+                      GROUP BY workspace_id, project_id, entity_id
+                    ), feedback_scores_agg AS (
+                        SELECT
+                            entity_id,
+                            mapFromArrays(
+                                groupArray(name),
+                                groupArray(value)
+                            ) as feedback_scores,
+                            groupArray(tuple(
+                                 name,
+                                 category_name,
+                                 value,
+                                 reason,
+                                 source,
+                                 created_at,
+                                 last_updated_at,
+                                 created_by,
+                                 last_updated_by
+                            )) as feedback_scores_list
+                        FROM feedback_scores final
+                        WHERE entity_type = 'span'
+                        AND workspace_id = :workspace_id
+                        AND project_id = :project_id
+                        GROUP BY workspace_id, project_id, entity_id
+                    )
+                    <if(feedback_scores_empty_filters)>
+                     , fsc AS (SELECT entity_id, COUNT(entity_id) AS feedback_scores_count
+                         FROM (
+                            SELECT *
+                            FROM feedback_scores
+                            WHERE entity_type = 'span'
+                            AND workspace_id = :workspace_id
+                            AND project_id = :project_id
+                            ORDER BY (workspace_id, project_id, entity_type, entity_id, name) DESC, last_updated_at DESC
+                            LIMIT 1 BY entity_id, name
+                         )
+                         GROUP BY entity_id
+                         HAVING <feedback_scores_empty_filters>
+                    )
+                    <endif>
+                    , spans_final AS (
+                        SELECT
+                              s.* <if(exclude_fields)>EXCEPT (<exclude_fields>) <endif>,
+                              if(end_time IS NOT NULL AND start_time IS NOT NULL
+                                       AND notEquals(start_time, toDateTime64('1970-01-01 00:00:00.000', 9)),
+                                   (dateDiff('microsecond', start_time, end_time) / 1000.0),
+                                   NULL) AS duration
+                        FROM spans s
+                        <if(sort_has_feedback_scores)>
+                        LEFT JOIN feedback_scores_agg fsagg ON fsagg.entity_id = s.id
+                        <endif>
+                        WHERE project_id = :project_id
+                        AND workspace_id = :workspace_id
+                        <if(last_received_span_id)> AND id \\< :last_received_span_id <endif>
+                        <if(trace_id)> AND trace_id = :trace_id <endif>
+                        <if(type)> AND type = :type <endif>
+                        <if(filters)> AND <filters> <endif>
+                        <if(feedback_scores_filters)>
+                        AND id in (
+                          SELECT
+                              entity_id
+                          FROM (
+                              SELECT *
+                              FROM feedback_scores
+                              WHERE entity_type = 'span'
+                              AND project_id = :project_id
+                              ORDER BY (workspace_id, project_id, entity_type, entity_id, name) DESC, last_updated_at DESC
+                              LIMIT 1 BY entity_id, name
+                          )
+                          GROUP BY entity_id
+                          HAVING <feedback_scores_filters>
+                        )
+                        <endif>
+                        <if(feedback_scores_empty_filters)>
+                         AND (
+                            id IN (SELECT entity_id FROM fsc WHERE fsc.feedback_scores_count = 0)
+                                OR
+                            id NOT IN (SELECT entity_id FROM fsc)
+                         )
+                        <endif>
+                        <if(stream)>
+                        ORDER BY (workspace_id, project_id, id) DESC, last_updated_at DESC
+                        <else>
+                        ORDER BY <if(sort_fields)> <sort_fields>, id DESC <else>(workspace_id, project_id, trace_id, parent_span_id, id) DESC, last_updated_at DESC <endif>
+                        <endif>
+                        LIMIT 1 BY id
+                        LIMIT :limit <if(offset)>OFFSET :offset <endif>
+                    )
+                    SELECT
+                        s.* <if(exclude_fields)>EXCEPT (<exclude_fields>, input, output, metadata) <else> EXCEPT (input, output, metadata)<endif>
+                        <if(!exclude_input)>, <if(truncate)> replaceRegexpAll(s.input, '<truncate>', '"[image]"') as input <else> s.input as input<endif> <endif>
+                        <if(!exclude_output)>, <if(truncate)> replaceRegexpAll(s.output, '<truncate>', '"[image]"') as output <else> s.output as output<endif> <endif>
+                        <if(!exclude_metadata)>, <if(truncate)> replaceRegexpAll(s.metadata, '<truncate>', '"[image]"') as metadata <else> s.metadata as metadata<endif> <endif>
+                        <if(!exclude_feedback_scores)>
+                        , fsa.feedback_scores_list as feedback_scores_list
+                        , fsa.feedback_scores as feedback_scores
+                        <endif>
+                        <if(!exclude_comments)>, c.comments AS comments <endif>
+                    FROM spans_final s
+                    LEFT JOIN comments_final c ON s.id = c.entity_id
+                    LEFT JOIN feedback_scores_agg fsa ON fsa.entity_id = s.id
+                    <if(stream)>
+                    ORDER BY (workspace_id, project_id, id) DESC, last_updated_at DESC
+                    <else>
+                    ORDER BY <if(sort_fields)> <sort_fields>, id DESC <else>(workspace_id, project_id, trace_id, parent_span_id, id) DESC, last_updated_at DESC <endif>
+                    <endif>
+                    ;
+                    >>
+                    """);
 
-    private static final String COUNT_BY_PROJECT_ID = """
+    private static final STGroupString COUNT_BY_PROJECT_ID_GROUP = new STGroupString("""
+            main(trace_id, type, filters, feedback_scores_filters, feedback_scores_empty_filters) ::= <<
             <if(feedback_scores_empty_filters)>
              WITH fsc AS (SELECT entity_id, COUNT(entity_id) AS feedback_scores_count
                  FROM (
@@ -760,7 +777,108 @@ class SpanDAO {
                 LIMIT 1 BY id
             ) AS latest_rows
             ;
-            """;
+            >>
+            """);
+
+    private static final STGroupString SELECT_SPANS_STATS_GROUP = new STGroupString(
+            """
+                    main(trace_id, type, filters, feedback_scores_filters, feedback_scores_empty_filters) ::= <<
+                    WITH feedback_scores_agg AS (
+                        SELECT
+                            project_id,
+                            entity_id,
+                            mapFromArrays(
+                                groupArray(name),
+                                groupArray(value)
+                            ) as feedback_scores
+                        FROM feedback_scores final
+                        WHERE entity_type = 'span'
+                        AND workspace_id = :workspace_id
+                        AND project_id = :project_id
+                        GROUP BY workspace_id, project_id, entity_id
+                    )
+                    <if(feedback_scores_empty_filters)>
+                     , fsc AS (SELECT entity_id, COUNT(entity_id) AS feedback_scores_count
+                         FROM (
+                            SELECT *
+                            FROM feedback_scores
+                            WHERE entity_type = 'span'
+                            AND workspace_id = :workspace_id
+                            AND project_id = :project_id
+                            ORDER BY (workspace_id, project_id, entity_type, entity_id, name) DESC, last_updated_at DESC
+                            LIMIT 1 BY entity_id, name
+                         )
+                         GROUP BY entity_id
+                         HAVING <feedback_scores_empty_filters>
+                    )
+                    <endif>
+                    , spans_final AS (
+                        SELECT
+                             workspace_id,
+                             project_id,
+                             id,
+                             if(end_time IS NOT NULL AND start_time IS NOT NULL
+                                         AND notEquals(start_time, toDateTime64('1970-01-01 00:00:00.000', 9)),
+                                     (dateDiff('microsecond', start_time, end_time) / 1000.0),
+                                     NULL) AS duration,
+                             if(input_length > 0, 1, 0) as input_count,
+                             if(output_length > 0, 1, 0) as output_count,
+                             if(metadata_length > 0, 1, 0) as metadata_count,
+                             length(tags) as tags_count,
+                             usage,
+                             total_estimated_cost,
+                             error_info
+                        FROM spans final
+                        <if(feedback_scores_empty_filters)>
+                            LEFT JOIN fsc ON fsc.entity_id = spans.id
+                        <endif>
+                        WHERE project_id = :project_id
+                        AND workspace_id = :workspace_id
+                        <if(trace_id)> AND trace_id = :trace_id <endif>
+                        <if(type)> AND type = :type <endif>
+                        <if(filters)> AND <filters> <endif>
+                        <if(feedback_scores_filters)>
+                        AND id in (
+                            SELECT
+                                entity_id
+                            FROM (
+                                SELECT *
+                                FROM feedback_scores
+                                WHERE entity_type = 'span'
+                                AND project_id = :project_id
+                                AND workspace_id = :workspace_id
+                                ORDER BY (workspace_id, project_id, entity_type, entity_id, name) DESC, last_updated_at DESC
+                                LIMIT 1 BY entity_id, name
+                            )
+                            GROUP BY entity_id
+                            HAVING <feedback_scores_filters>
+                        )
+                        <endif>
+                        <if(feedback_scores_empty_filters)>
+                        AND fsc.feedback_scores_count = 0
+                        <endif>
+                    )
+                    SELECT
+                        project_id as project_id,
+                        count(DISTINCT id) as span_count,
+                        arrayMap(v -> toDecimal64(if(isNaN(v), 0, v), 9), quantiles(0.5, 0.9, 0.99)(duration)) AS duration,
+                        sum(input_count) as input,
+                        sum(output_count) as output,
+                        sum(metadata_count) as metadata,
+                        avg(tags_count) as tags,
+                        avgMap(usage) as usage,
+                        avgMap(feedback_scores) AS feedback_scores,
+                        avgIf(total_estimated_cost, total_estimated_cost > 0) AS total_estimated_cost_,
+                        toDecimal128(if(isNaN(total_estimated_cost_), 0, total_estimated_cost_), 12) AS total_estimated_cost_avg,
+                        sumIf(total_estimated_cost, total_estimated_cost > 0) AS total_estimated_cost_sum_,
+                        toDecimal128(total_estimated_cost_sum_, 12) AS total_estimated_cost_sum,
+                        countIf(error_info, error_info != '') AS error_count
+                    FROM spans_final s
+                    LEFT JOIN feedback_scores_agg AS f ON s.id = f.entity_id
+                    GROUP BY project_id
+                    ;
+                    >>
+                    """);
 
     private static final String DELETE_BY_TRACE_IDS = """
             DELETE FROM spans WHERE trace_id IN :trace_ids AND workspace_id = :workspace_id;
@@ -782,104 +900,7 @@ class SpanDAO {
             AND workspace_id = :workspace_id
             """;
 
-    private static final String SELECT_SPANS_STATS = """
-            WITH feedback_scores_agg AS (
-                SELECT
-                    project_id,
-                    entity_id,
-                    mapFromArrays(
-                        groupArray(name),
-                        groupArray(value)
-                    ) as feedback_scores
-                FROM feedback_scores final
-                WHERE entity_type = 'span'
-                AND workspace_id = :workspace_id
-                AND project_id = :project_id
-                GROUP BY workspace_id, project_id, entity_id
-            )
-            <if(feedback_scores_empty_filters)>
-             , fsc AS (SELECT entity_id, COUNT(entity_id) AS feedback_scores_count
-                 FROM (
-                    SELECT *
-                    FROM feedback_scores
-                    WHERE entity_type = 'span'
-                    AND workspace_id = :workspace_id
-                    AND project_id = :project_id
-                    ORDER BY (workspace_id, project_id, entity_type, entity_id, name) DESC, last_updated_at DESC
-                    LIMIT 1 BY entity_id, name
-                 )
-                 GROUP BY entity_id
-                 HAVING <feedback_scores_empty_filters>
-            )
-            <endif>
-            , spans_final AS (
-                SELECT
-                     workspace_id,
-                     project_id,
-                     id,
-                     if(end_time IS NOT NULL AND start_time IS NOT NULL
-                                 AND notEquals(start_time, toDateTime64('1970-01-01 00:00:00.000', 9)),
-                             (dateDiff('microsecond', start_time, end_time) / 1000.0),
-                             NULL) AS duration,
-                     if(input_length > 0, 1, 0) as input_count,
-                     if(output_length > 0, 1, 0) as output_count,
-                     if(metadata_length > 0, 1, 0) as metadata_count,
-                     length(tags) as tags_count,
-                     usage,
-                     total_estimated_cost,
-                     error_info
-                FROM spans final
-                <if(feedback_scores_empty_filters)>
-                    LEFT JOIN fsc ON fsc.entity_id = spans.id
-                <endif>
-                WHERE project_id = :project_id
-                AND workspace_id = :workspace_id
-                <if(trace_id)> AND trace_id = :trace_id <endif>
-                <if(type)> AND type = :type <endif>
-                <if(filters)> AND <filters> <endif>
-                <if(feedback_scores_filters)>
-                AND id in (
-                    SELECT
-                        entity_id
-                    FROM (
-                        SELECT *
-                        FROM feedback_scores
-                        WHERE entity_type = 'span'
-                        AND project_id = :project_id
-                        AND workspace_id = :workspace_id
-                        ORDER BY (workspace_id, project_id, entity_type, entity_id, name) DESC, last_updated_at DESC
-                        LIMIT 1 BY entity_id, name
-                    )
-                    GROUP BY entity_id
-                    HAVING <feedback_scores_filters>
-                )
-                <endif>
-                <if(feedback_scores_empty_filters)>
-                AND fsc.feedback_scores_count = 0
-                <endif>
-            )
-            SELECT
-                project_id as project_id,
-                count(DISTINCT id) as span_count,
-                arrayMap(v -> toDecimal64(if(isNaN(v), 0, v), 9), quantiles(0.5, 0.9, 0.99)(duration)) AS duration,
-                sum(input_count) as input,
-                sum(output_count) as output,
-                sum(metadata_count) as metadata,
-                avg(tags_count) as tags,
-                avgMap(usage) as usage,
-                avgMap(feedback_scores) AS feedback_scores,
-                avgIf(total_estimated_cost, total_estimated_cost > 0) AS total_estimated_cost_,
-                toDecimal128(if(isNaN(total_estimated_cost_), 0, total_estimated_cost_), 12) AS total_estimated_cost_avg,
-                sumIf(total_estimated_cost, total_estimated_cost > 0) AS total_estimated_cost_sum_,
-                toDecimal128(total_estimated_cost_sum_, 12) AS total_estimated_cost_sum,
-                countIf(error_info, error_info != '') AS error_count
-            FROM spans_final s
-            LEFT JOIN feedback_scores_agg AS f ON s.id = f.entity_id
-            GROUP BY project_id
-            ;
-            """;
-
-    public static final String SELECT_SPAN_IDS_BY_TRACE_ID = """
+    private static final String SELECT_SPAN_IDS_BY_TRACE_ID = """
             SELECT
                   DISTINCT id
             FROM spans
@@ -888,23 +909,23 @@ class SpanDAO {
             """;
 
     private static final String SPAN_COUNT_BY_WORKSPACE_ID = """
-                SELECT
-                     workspace_id,
-                     COUNT(DISTINCT id) as span_count
-                 FROM spans
-                 WHERE created_at BETWEEN toStartOfDay(yesterday()) AND toStartOfDay(today())
-                 GROUP BY workspace_id
+            SELECT
+                 workspace_id,
+                 COUNT(DISTINCT id) as span_count
+             FROM spans
+             WHERE created_at BETWEEN toStartOfDay(yesterday()) AND toStartOfDay(today())
+             GROUP BY workspace_id
             ;
             """;
 
     private static final String SPAN_DAILY_BI_INFORMATION = """
-                SELECT
-                     workspace_id,
-                     created_by AS user,
-                     COUNT(DISTINCT id) AS span_count
-                FROM spans
-                WHERE created_at BETWEEN toStartOfDay(yesterday()) AND toStartOfDay(today())
-                GROUP BY workspace_id, created_by
+            SELECT
+                 workspace_id,
+                 created_by AS user,
+                 COUNT(DISTINCT id) AS span_count
+            FROM spans
+            WHERE created_at BETWEEN toStartOfDay(yesterday()) AND toStartOfDay(today())
+            GROUP BY workspace_id, created_by
             ;
             """;
 
@@ -940,7 +961,7 @@ class SpanDAO {
         return makeMonoContextAware((userName, workspaceId) -> {
             List<TemplateUtils.QueryItem> queryItems = getQueryItemPlaceHolder(spans.size());
 
-            var template = new ST(BULK_INSERT)
+            var template = BULK_INSERT_GROUP.getInstanceOf("main")
                     .add("items", queryItems);
 
             Statement statement = connection.createStatement(template.render());
@@ -1012,6 +1033,7 @@ class SpanDAO {
 
     private Publisher<? extends Result> insert(Span span, Connection connection) {
         var template = newInsertTemplate(span);
+
         var statement = connection.createStatement(template.render())
                 .bind("id", span.id())
                 .bind("project_id", span.projectId())
@@ -1072,7 +1094,7 @@ class SpanDAO {
     }
 
     private ST newInsertTemplate(Span span) {
-        var template = new ST(INSERT);
+        var template = INSERT_GROUP.getInstanceOf("main");
         Optional.ofNullable(span.endTime())
                 .ifPresent(endTime -> template.add("end_time", endTime));
         return template;
@@ -1090,7 +1112,7 @@ class SpanDAO {
     public Mono<Long> partialInsert(@NonNull UUID id, @NonNull UUID projectId, @NonNull SpanUpdate spanUpdate) {
         return Mono.from(connectionFactory.create())
                 .flatMapMany(connection -> {
-                    ST template = newUpdateTemplate(spanUpdate, PARTIAL_INSERT, false);
+                    ST template = newUpdateTemplate(spanUpdate, PARTIAL_INSERT_GROUP, false);
 
                     var statement = connection.createStatement(template.render());
 
@@ -1125,7 +1147,7 @@ class SpanDAO {
                     .build();
         }
 
-        var template = newUpdateTemplate(spanUpdate, UPDATE, isManualCost(existingSpan));
+        var template = newUpdateTemplate(spanUpdate, UPDATE_GROUP, isManualCost(existingSpan));
         var statement = connection.createStatement(template.render());
         statement.bind("id", id);
 
@@ -1188,9 +1210,8 @@ class SpanDAO {
         }
     }
 
-    private ST newUpdateTemplate(SpanUpdate spanUpdate, String sql, boolean isManualCostExist) {
-        var template = new ST(sql);
-
+    private ST newUpdateTemplate(SpanUpdate spanUpdate, STGroup stGroup, boolean isManualCostExist) {
+        var template = stGroup.getInstanceOf("main");
         if (StringUtils.isNotBlank(spanUpdate.name())) {
             template.add("name", spanUpdate.name());
         }
@@ -1425,7 +1446,7 @@ class SpanDAO {
 
     private Flux<? extends Result> findSpanStream(int limit, SpanSearchCriteria criteria, Connection connection) {
         log.info("Searching spans by '{}'", criteria);
-        var template = newFindTemplate(SELECT_BY_PROJECT_ID, criteria);
+        var template = newFindTemplate(SELECT_BY_PROJECT_ID_GROUP, criteria);
 
         template = ImageUtils.addTruncateToTemplate(template, criteria.truncate());
 
@@ -1448,7 +1469,7 @@ class SpanDAO {
     private Publisher<? extends Result> find(Integer page, int size, SpanSearchCriteria spanSearchCriteria,
             Connection connection) {
 
-        var template = newFindTemplate(SELECT_BY_PROJECT_ID, spanSearchCriteria);
+        var template = newFindTemplate(SELECT_BY_PROJECT_ID_GROUP, spanSearchCriteria);
         template.add("offset", (page - 1) * size);
 
         template = ImageUtils.addTruncateToTemplate(template, spanSearchCriteria.truncate());
@@ -1532,7 +1553,7 @@ class SpanDAO {
     }
 
     private Publisher<? extends Result> countTotal(SpanSearchCriteria spanSearchCriteria, Connection connection) {
-        var template = newFindTemplate(COUNT_BY_PROJECT_ID, spanSearchCriteria);
+        var template = newFindTemplate(COUNT_BY_PROJECT_ID_GROUP, spanSearchCriteria);
         var statement = connection.createStatement(template.render())
                 .bind("project_id", spanSearchCriteria.projectId());
 
@@ -1544,8 +1565,8 @@ class SpanDAO {
                 .doFinally(signalType -> endSegment(segment));
     }
 
-    private ST newFindTemplate(String query, SpanSearchCriteria spanSearchCriteria) {
-        var template = new ST(query);
+    private ST newFindTemplate(STGroupString group, SpanSearchCriteria spanSearchCriteria) {
+        var template = group.getInstanceOf("main");
         Optional.ofNullable(spanSearchCriteria.traceId())
                 .ifPresent(traceId -> template.add("trace_id", traceId));
         Optional.ofNullable(spanSearchCriteria.type())
@@ -1620,7 +1641,7 @@ class SpanDAO {
 
         return Mono.from(connectionFactory.create())
                 .flatMapMany(connection -> {
-                    var template = newFindTemplate(SELECT_SPANS_STATS, searchCriteria);
+                    var template = newFindTemplate(SELECT_SPANS_STATS_GROUP, searchCriteria);
 
                     var statement = connection.createStatement(template.render())
                             .bind("project_id", searchCriteria.projectId());
