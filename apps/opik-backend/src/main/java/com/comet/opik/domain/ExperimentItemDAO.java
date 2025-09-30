@@ -320,11 +320,44 @@ class ExperimentItemDAO {
                     ei.dataset_item_id,
                     ei.trace_id
                 FROM experiment_items ei
-                <if(filters)>
-                INNER JOIN dataset_items di ON ei.dataset_item_id = di.id AND di.workspace_id = :workspace_id AND <filters>
-                <endif>
                 WHERE ei.workspace_id = :workspace_id
                 AND ei.experiment_id IN :experiment_ids
+                <if(experiment_item_filters)>
+                AND ei.trace_id IN (
+                    SELECT id FROM traces WHERE workspace_id = :workspace_id AND <experiment_item_filters>
+                )
+                <endif>
+                <if(feedback_scores_filters)>
+                AND ei.trace_id IN (
+                    SELECT entity_id
+                    FROM feedback_scores final
+                    WHERE workspace_id = :workspace_id AND entity_type = 'trace'
+                    GROUP BY entity_id, name
+                    HAVING <feedback_scores_filters>
+                )
+                <endif>
+                <if(feedback_scores_empty_filters)>
+                AND ei.trace_id IN (
+                    SELECT entity_id
+                    FROM (
+                        SELECT entity_id, COUNT(entity_id) AS feedback_scores_count
+                        FROM (
+                            SELECT *
+                            FROM feedback_scores final
+                            WHERE workspace_id = :workspace_id AND entity_type = 'trace'
+                            ORDER BY (workspace_id, project_id, entity_id, name) DESC, last_updated_at DESC
+                            LIMIT 1 BY entity_id, name
+                        )
+                        GROUP BY entity_id
+                        HAVING <feedback_scores_empty_filters>
+                    )
+                )
+                <endif>
+                <if(dataset_item_filters)>
+                AND ei.dataset_item_id IN (
+                    SELECT id FROM dataset_items WHERE workspace_id = :workspace_id AND <dataset_item_filters>
+                )
+                <endif>
             ), traces_with_cost_and_duration AS (
                 SELECT DISTINCT
                     eif.trace_id as trace_id,
@@ -656,8 +689,24 @@ class ExperimentItemDAO {
         Optional.ofNullable(filters)
                 .ifPresent(filtersParam -> {
                     filterQueryBuilder.toAnalyticsDbFilters(filtersParam,
+                            com.comet.opik.domain.filter.FilterStrategy.EXPERIMENT_ITEM)
+                            .ifPresent(experimentItemFilters -> template.add("experiment_item_filters",
+                                    experimentItemFilters));
+
+                    filterQueryBuilder.toAnalyticsDbFilters(filtersParam,
+                            com.comet.opik.domain.filter.FilterStrategy.FEEDBACK_SCORES)
+                            .ifPresent(feedbackScoresFilters -> template.add("feedback_scores_filters",
+                                    feedbackScoresFilters));
+
+                    filterQueryBuilder.toAnalyticsDbFilters(filtersParam,
+                            com.comet.opik.domain.filter.FilterStrategy.FEEDBACK_SCORES_IS_EMPTY)
+                            .ifPresent(feedbackScoresEmptyFilters -> template.add("feedback_scores_empty_filters",
+                                    feedbackScoresEmptyFilters));
+
+                    filterQueryBuilder.toAnalyticsDbFilters(filtersParam,
                             com.comet.opik.domain.filter.FilterStrategy.DATASET_ITEM)
-                            .ifPresent(datasetItemFilters -> template.add("filters", datasetItemFilters));
+                            .ifPresent(datasetItemFilters -> template.add("dataset_item_filters",
+                                    datasetItemFilters));
                 });
 
         String sql = template.render();
@@ -669,8 +718,16 @@ class ExperimentItemDAO {
                     statement.bind("experiment_ids", experimentIds.toArray(UUID[]::new));
 
                     Optional.ofNullable(filters)
-                            .ifPresent(filtersParam -> filterQueryBuilder.bind(statement, filtersParam,
-                                    com.comet.opik.domain.filter.FilterStrategy.DATASET_ITEM));
+                            .ifPresent(filtersParam -> {
+                                filterQueryBuilder.bind(statement, filtersParam,
+                                        com.comet.opik.domain.filter.FilterStrategy.EXPERIMENT_ITEM);
+                                filterQueryBuilder.bind(statement, filtersParam,
+                                        com.comet.opik.domain.filter.FilterStrategy.FEEDBACK_SCORES);
+                                filterQueryBuilder.bind(statement, filtersParam,
+                                        com.comet.opik.domain.filter.FilterStrategy.FEEDBACK_SCORES_IS_EMPTY);
+                                filterQueryBuilder.bind(statement, filtersParam,
+                                        com.comet.opik.domain.filter.FilterStrategy.DATASET_ITEM);
+                            });
 
                     return makeFluxContextAware(bindWorkspaceIdToFlux(statement));
                 })

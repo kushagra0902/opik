@@ -5544,6 +5544,254 @@ class ExperimentsResourceTest {
 
             assertThat(statsWithFilter).isNotNull();
             assertThat(statsWithoutFilter).isNotNull();
+
+            // Verify filtering actually worked
+            var filteredCount = statsWithFilter.stats().stream()
+                    .filter(stat -> "experiment_items_count".equals(stat.getName()))
+                    .findFirst()
+                    .map(stat -> ((com.comet.opik.api.ProjectStats.CountValueStat) stat).getValue())
+                    .orElse(0L);
+
+            var unfilteredCount = statsWithoutFilter.stats().stream()
+                    .filter(stat -> "experiment_items_count".equals(stat.getName()))
+                    .findFirst()
+                    .map(stat -> ((com.comet.opik.api.ProjectStats.CountValueStat) stat).getValue())
+                    .orElse(0L);
+
+            assertThat(filteredCount).isEqualTo(1L);
+            assertThat(unfilteredCount).isEqualTo(2L);
+        }
+
+        @Test
+        @DisplayName("when getting stats with feedback score filter, then return filtered stats")
+        void getExperimentItemsStats_whenFeedbackScoreFilter_thenReturnFilteredStats() {
+            var datasetName = RandomStringUtils.randomAlphanumeric(10);
+            var datasetId = datasetResourceClient.createDataset(
+                    Dataset.builder().name(datasetName).build(), API_KEY, TEST_WORKSPACE);
+
+            var experiment = experimentResourceClient.createPartialExperiment()
+                    .name("Test Experiment")
+                    .datasetName(datasetName)
+                    .build();
+            var experimentId = experimentResourceClient.create(experiment, API_KEY, TEST_WORKSPACE);
+
+            var datasetItemId1 = podamFactory.manufacturePojo(UUID.class);
+            var datasetItemId2 = podamFactory.manufacturePojo(UUID.class);
+            var datasetItems = List.of(
+                    podamFactory.manufacturePojo(DatasetItem.class).toBuilder()
+                            .id(datasetItemId1)
+                            .datasetId(datasetId)
+                            .data(Map.of("input",
+                                    JsonUtils.getJsonNodeFromString(
+                                            "{\"query\": \"test 1\"}")))
+                            .build(),
+                    podamFactory.manufacturePojo(DatasetItem.class).toBuilder()
+                            .id(datasetItemId2)
+                            .datasetId(datasetId)
+                            .data(Map.of("input",
+                                    JsonUtils.getJsonNodeFromString(
+                                            "{\"query\": \"test 2\"}")))
+                            .build());
+
+            datasetResourceClient.createDatasetItems(
+                    new DatasetItemBatch(datasetName, null, datasetItems), TEST_WORKSPACE, API_KEY);
+
+            var traceId1 = podamFactory.manufacturePojo(UUID.class);
+            var traceId2 = podamFactory.manufacturePojo(UUID.class);
+
+            var experimentItem1 = podamFactory.manufacturePojo(ExperimentItem.class).toBuilder()
+                    .experimentId(experimentId)
+                    .datasetItemId(datasetItemId1)
+                    .traceId(traceId1)
+                    .output(JsonUtils.getJsonNodeFromString("{\"result\": \"output 1\"}"))
+                    .build();
+            var experimentItem2 = podamFactory.manufacturePojo(ExperimentItem.class).toBuilder()
+                    .experimentId(experimentId)
+                    .datasetItemId(datasetItemId2)
+                    .traceId(traceId2)
+                    .output(JsonUtils.getJsonNodeFromString("{\"result\": \"output 2\"}"))
+                    .build();
+
+            experimentResourceClient.createExperimentItem(Set.of(experimentItem1, experimentItem2), API_KEY,
+                    TEST_WORKSPACE);
+
+            // Add feedback scores
+            var feedbackScore1 = FeedbackScoreBatchItem.builder()
+                    .id(traceId1)
+                    .name("accuracy")
+                    .value(BigDecimal.valueOf(0.9))
+                    .build();
+            var feedbackScore2 = FeedbackScoreBatchItem.builder()
+                    .id(traceId2)
+                    .name("accuracy")
+                    .value(BigDecimal.valueOf(0.3))
+                    .build();
+
+            traceResourceClient.feedbackScores(
+                    List.of(feedbackScore1, feedbackScore2),
+                    API_KEY, TEST_WORKSPACE);
+
+            // Filter by feedback score > 0.5
+            var filter = com.comet.opik.api.filter.ExperimentsComparisonFilter.builder()
+                    .field("feedback_scores.accuracy")
+                    .operator(com.comet.opik.api.filter.Operator.GREATER_THAN)
+                    .value("0.5")
+                    .build();
+
+            var statsWithFilter = experimentResourceClient.getExperimentItemsStats(List.of(experimentId),
+                    List.of(filter), API_KEY, TEST_WORKSPACE);
+            var statsWithoutFilter = experimentResourceClient.getExperimentItemsStats(List.of(experimentId),
+                    null,
+                    API_KEY, TEST_WORKSPACE);
+
+            assertThat(statsWithFilter).isNotNull();
+            assertThat(statsWithoutFilter).isNotNull();
+
+            // Verify filtering actually worked
+            var filteredCount = statsWithFilter.stats().stream()
+                    .filter(stat -> "experiment_items_count".equals(stat.getName()))
+                    .findFirst()
+                    .map(stat -> ((com.comet.opik.api.ProjectStats.CountValueStat) stat).getValue())
+                    .orElse(0L);
+
+            var unfilteredCount = statsWithoutFilter.stats().stream()
+                    .filter(stat -> "experiment_items_count".equals(stat.getName()))
+                    .findFirst()
+                    .map(stat -> ((com.comet.opik.api.ProjectStats.CountValueStat) stat).getValue())
+                    .orElse(0L);
+
+            assertThat(filteredCount).isEqualTo(1L);
+            assertThat(unfilteredCount).isEqualTo(2L);
+        }
+
+        @Test
+        @DisplayName("when getting stats with combined filters, then return filtered stats")
+        void getExperimentItemsStats_whenCombinedFilters_thenReturnFilteredStats() {
+            var datasetName = RandomStringUtils.randomAlphanumeric(10);
+            var datasetId = datasetResourceClient.createDataset(
+                    Dataset.builder().name(datasetName).build(), API_KEY, TEST_WORKSPACE);
+
+            var experiment = experimentResourceClient.createPartialExperiment()
+                    .name("Test Experiment")
+                    .datasetName(datasetName)
+                    .build();
+            var experimentId = experimentResourceClient.create(experiment, API_KEY, TEST_WORKSPACE);
+
+            var datasetItemId1 = podamFactory.manufacturePojo(UUID.class);
+            var datasetItemId2 = podamFactory.manufacturePojo(UUID.class);
+            var datasetItemId3 = podamFactory.manufacturePojo(UUID.class);
+
+            var datasetItems = List.of(
+                    podamFactory.manufacturePojo(DatasetItem.class).toBuilder()
+                            .id(datasetItemId1)
+                            .datasetId(datasetId)
+                            .data(Map.of("input",
+                                    JsonUtils.getJsonNodeFromString(
+                                            "{\"query\": \"query 1\"}")))
+                            .build(),
+                    podamFactory.manufacturePojo(DatasetItem.class).toBuilder()
+                            .id(datasetItemId2)
+                            .datasetId(datasetId)
+                            .data(Map.of("input",
+                                    JsonUtils.getJsonNodeFromString(
+                                            "{\"query\": \"query 2\"}")))
+                            .build(),
+                    podamFactory.manufacturePojo(DatasetItem.class).toBuilder()
+                            .id(datasetItemId3)
+                            .datasetId(datasetId)
+                            .data(Map.of("input",
+                                    JsonUtils.getJsonNodeFromString(
+                                            "{\"query\": \"other\"}")))
+                            .build());
+
+            datasetResourceClient.createDatasetItems(
+                    new DatasetItemBatch(datasetName, null, datasetItems), TEST_WORKSPACE, API_KEY);
+
+            var traceId1 = podamFactory.manufacturePojo(UUID.class);
+            var traceId2 = podamFactory.manufacturePojo(UUID.class);
+            var traceId3 = podamFactory.manufacturePojo(UUID.class);
+
+            var experimentItems = Set.of(
+                    podamFactory.manufacturePojo(ExperimentItem.class).toBuilder()
+                            .experimentId(experimentId)
+                            .datasetItemId(datasetItemId1)
+                            .traceId(traceId1)
+                            .output(JsonUtils.getJsonNodeFromString(
+                                    "{\"result\": \"success\"}"))
+                            .build(),
+                    podamFactory.manufacturePojo(ExperimentItem.class).toBuilder()
+                            .experimentId(experimentId)
+                            .datasetItemId(datasetItemId2)
+                            .traceId(traceId2)
+                            .output(JsonUtils.getJsonNodeFromString(
+                                    "{\"result\": \"success\"}"))
+                            .build(),
+                    podamFactory.manufacturePojo(ExperimentItem.class).toBuilder()
+                            .experimentId(experimentId)
+                            .datasetItemId(datasetItemId3)
+                            .traceId(traceId3)
+                            .output(JsonUtils.getJsonNodeFromString(
+                                    "{\"result\": \"failure\"}"))
+                            .build());
+
+            experimentResourceClient.createExperimentItem(experimentItems, API_KEY, TEST_WORKSPACE);
+
+            // Add feedback scores
+            traceResourceClient.feedbackScores(
+                    List.of(FeedbackScoreBatchItem.builder().id(traceId1)
+                            .name("quality").value(BigDecimal.valueOf(0.9)).build(),
+                            FeedbackScoreBatchItem.builder().id(traceId2)
+                                    .name("quality").value(BigDecimal.valueOf(0.8))
+                                    .build(),
+                            FeedbackScoreBatchItem.builder().id(traceId3)
+                                    .name("quality").value(BigDecimal.valueOf(0.4))
+                                    .build()),
+                    API_KEY, TEST_WORKSPACE);
+
+            // Combine filters: dataset item input contains "query" AND output contains
+            // "success" AND feedback score > 0.5
+            var filters = List.of(
+                    com.comet.opik.api.filter.ExperimentsComparisonFilter.builder()
+                            .field("data.input")
+                            .operator(com.comet.opik.api.filter.Operator.CONTAINS)
+                            .value("query")
+                            .build(),
+                    com.comet.opik.api.filter.ExperimentsComparisonFilter.builder()
+                            .field("output")
+                            .operator(com.comet.opik.api.filter.Operator.CONTAINS)
+                            .value("success")
+                            .build(),
+                    com.comet.opik.api.filter.ExperimentsComparisonFilter.builder()
+                            .field("feedback_scores.quality")
+                            .operator(com.comet.opik.api.filter.Operator.GREATER_THAN)
+                            .value("0.5")
+                            .build());
+
+            var statsWithFilter = experimentResourceClient.getExperimentItemsStats(List.of(experimentId),
+                    filters,
+                    API_KEY, TEST_WORKSPACE);
+            var statsWithoutFilter = experimentResourceClient.getExperimentItemsStats(List.of(experimentId),
+                    null,
+                    API_KEY, TEST_WORKSPACE);
+
+            assertThat(statsWithFilter).isNotNull();
+            assertThat(statsWithoutFilter).isNotNull();
+
+            // Only 2 items match all criteria (datasetItemId1 and datasetItemId2)
+            var filteredCount = statsWithFilter.stats().stream()
+                    .filter(stat -> "experiment_items_count".equals(stat.getName()))
+                    .findFirst()
+                    .map(stat -> ((com.comet.opik.api.ProjectStats.CountValueStat) stat).getValue())
+                    .orElse(0L);
+
+            var unfilteredCount = statsWithoutFilter.stats().stream()
+                    .filter(stat -> "experiment_items_count".equals(stat.getName()))
+                    .findFirst()
+                    .map(stat -> ((com.comet.opik.api.ProjectStats.CountValueStat) stat).getValue())
+                    .orElse(0L);
+
+            assertThat(filteredCount).isEqualTo(2L);
+            assertThat(unfilteredCount).isEqualTo(3L);
         }
 
         @Test
@@ -5592,4 +5840,3 @@ class ExperimentsResourceTest {
         }
     }
 }
-
