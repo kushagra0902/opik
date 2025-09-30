@@ -320,16 +320,11 @@ class ExperimentItemDAO {
                     ei.dataset_item_id,
                     ei.trace_id
                 FROM experiment_items ei
+                <if(filters)>
+                INNER JOIN dataset_items di ON ei.dataset_item_id = di.id AND di.workspace_id = :workspace_id AND <filters>
+                <endif>
                 WHERE ei.workspace_id = :workspace_id
                 AND ei.experiment_id IN :experiment_ids
-                <if(filters)>
-                AND ei.dataset_item_id IN (
-                    SELECT di.id
-                    FROM dataset_items di
-                    WHERE di.workspace_id = :workspace_id
-                    AND <filters>
-                )
-                <endif>
             ), traces_with_cost_and_duration AS (
                 SELECT DISTINCT
                     eif.trace_id as trace_id,
